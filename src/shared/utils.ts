@@ -2,7 +2,7 @@
 // the current lossless ordered [name, value][] array (duplicates preserved) and
 // the legacy { name: value } object (rows synced before losslessization). A row
 // only converts to the array shape when a body-bearing fetch re-visits it, and
-// free-tier accounts never re-fetch their older mail — so the legacy shape is
+// already-stored older mail is never re-fetched — so the legacy shape is
 // permanent and every reader must accept both.
 export function parseHeaderPairs(
   headersJson: string | null | undefined,

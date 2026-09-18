@@ -76,10 +76,6 @@ jest.mock("./services/analysis", () => ({
   needsAnalysisPass: mockNeedsAnalysisPass,
 }));
 
-jest.mock("./services/settings", () => ({
-  getLicenseStatus: () => ({ active: true }),
-}));
-
 jest.mock("./utils/log", () => {
   const logger = {
     debug: jest.fn(),
@@ -172,7 +168,6 @@ describe("Refresh analysis scheduling", () => {
     expect(mockWorkerInstances[1].workerData).toMatchObject({
       mode: "profile-analysis",
       credentials: null,
-      licensed: false,
     });
     expect(getSyncStatus().message).toBe("Analyzing messages");
 

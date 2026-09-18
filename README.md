@@ -39,12 +39,9 @@ IMAP Presets: Proton, Yahoo Mail, Fastmail, Yandex, Zoho, Mailbox.org, Posteo, G
 
 ## License
 
-Core features available for free. Upgrade for unlimited history, multiple accounts and to support open-source software development.
+MIT. This build has no paid tier: full email history, multiple accounts and every feature are available without a license key.
 
-- **Free tier**: 90-day email scan, core features included
-- **Perpetual license**: All features, unlimited email history, multiple email accounts, permanent use of Paperweight
-
-[Buy a perpetual license and support development →](https://www.paperweight.email/#pricing)
+If Paperweight is useful to you, consider [supporting the upstream developer](https://www.paperweight.email/#pricing).
 
 ## Development
 

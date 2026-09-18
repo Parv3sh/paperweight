@@ -100,12 +100,6 @@ const api: ElectronAPI = {
 
   getEmailConnection: () => ipcRenderer.invoke(IPC.getEmailConnection),
 
-  activateLicense: (key) => ipcRenderer.invoke(IPC.activateLicense, key),
-
-  getLicenseStatus: () => ipcRenderer.invoke(IPC.getLicenseStatus),
-
-  deactivateLicense: () => ipcRenderer.invoke(IPC.deactivateLicense),
-
   getSupportInfo: () => ipcRenderer.invoke(IPC.getSupportInfo),
   getStorageBreakdown: () => ipcRenderer.invoke(IPC.getStorageBreakdown),
 
@@ -137,8 +131,6 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC.getActivityLog, limit, offset),
 
   listAccounts: () => ipcRenderer.sendSync(IPC.listAccounts),
-
-  addAccount: () => ipcRenderer.invoke(IPC.addAccount),
 
   switchAccount: (email) => ipcRenderer.invoke(IPC.switchAccount, email),
 

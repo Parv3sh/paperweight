@@ -44,7 +44,6 @@ if (parentPort !== null) {
 export const appLog = log.scope("app");
 export const syncLog = log.scope("sync");
 export const authLog = log.scope("auth");
-export const licenseLog = log.scope("license");
 export const dataLog = log.scope("data");
 export const actionLog = log.scope("action");
 export const dbLog = log.scope("db");

@@ -101,7 +101,7 @@ async function backfillSmtpFromPreset(): Promise<void> {
  * v0.4 — all-mail scan. Providers now scan all mail (not just inbox), so existing accounts
  * re-sync to pick up archived/foldered messages. Idempotent per account via the
  * `migration:all-mail-scope` settings marker. Preserves vendors, action_log, whitelist,
- * settings and license — only message rows and sync cursors are touched. Runs before
+ * settings — only message rows and sync cursors are touched. Runs before
  * initDb(), so each account DB is opened directly with no active connection.
  *
  *   - imap & microsoft: message IDs can't be reconciled across the scope change (IMAP UIDs
@@ -168,10 +168,10 @@ function migrateScanScopeAllMail(): void {
  *
  * **Nothing is cleared.** Message IDs are stable for all three providers, so
  * resetting the sync cursors is enough to make the next sync behave like a fresh
- * install — quick window first, then the licensed walk back to the start — and
+ * install — quick window first, then the historical walk back to the start — and
  * every re-visited row merges through insertMessageVendor's upsert. Vendors,
  * messages, action_log, gdpr_cases, whitelist, pii_findings, pii_suppressions,
- * settings and the license all survive untouched.
+ * settings all survive untouched.
  *
  * `sync_checkpoint` is deliberately left alone: it is the removal-pass cursor
  * (Gmail's History API), unrelated to the add path, and re-baselining it would

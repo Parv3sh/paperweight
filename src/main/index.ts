@@ -131,39 +131,12 @@ app.whenReady().then(async () => {
   // Determine if we should start hidden (must be after DB is available)
   startHidden = wasLaunchedAsHidden(launchMinimized);
 
-  const win = createWindow();
+  createWindow();
   appLog.info("Window created");
 
-  const emitUpdateDownloaded = (latest: string) => {
-    const current = app.getVersion();
-    const isMajor = latest.split(".")[0] !== current.split(".")[0];
-    lastUpdateInfo = { latest, current, isMajor };
-    win.webContents.send(IPC.updateDownloaded, lastUpdateInfo);
-  };
-
-  if (!is.dev) {
-    autoUpdater.logger = appLog;
-    autoUpdater.allowPrerelease = true;
-    autoUpdater.autoDownload = true;
-    autoUpdater.on("error", (err) => {
-      appLog.warn("Auto-update error:", err);
-    });
-    autoUpdater.on("update-downloaded", (info) => {
-      emitUpdateDownloaded(info.version);
-    });
-    // checkForUpdates resolves with a downloadPromise when autoDownload is on;
-    // that download is not awaited by checkForUpdates itself, so catch both.
-    autoUpdater
-      .checkForUpdates()
-      .then((result) => {
-        result?.downloadPromise?.catch((err) => {
-          appLog.warn("Auto-update download failed:", err);
-        });
-      })
-      .catch((err) => {
-        appLog.warn("Auto-update check failed:", err);
-      });
-  }
+  // Auto-update is intentionally disabled in this build. The updater would
+  // fetch the upstream GitHub release, which still ships the paid-license
+  // gating this fork removed. Update by rebuilding from source instead.
 
   if (seedUserDataDir) {
     appLog.info("Seed profile enabled; automatic sync disabled");

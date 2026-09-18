@@ -1,10 +1,8 @@
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useEffect, useState } from "react";
-import type { LicenseStatus } from "@shared/types";
 import type { UpdateInfo } from "@shared/ipc";
 import AppShell from "./components/AppShell";
 import UpdateBanner from "./components/UpdateBanner";
-import { LicenseProvider } from "./context/LicenseContext";
 import Onboarding from "./pages/Onboarding";
 import Dashboard from "./pages/Dashboard";
 import Mail from "./pages/Mail";
@@ -19,19 +17,13 @@ import Support from "./pages/Support";
 import Activity from "./pages/Activity";
 
 function AuthGate({ children }: { children: React.ReactNode }): JSX.Element {
-  const [state, setState] = useState<{
-    connected?: boolean;
-    license?: LicenseStatus;
-  }>({});
+  const [connected, setConnected] = useState<boolean>();
 
   useEffect(() => {
-    Promise.all([
-      window.api.getConnectionStatus(),
-      window.api.getLicenseStatus(),
-    ]).then(([connected, license]) => setState({ connected, license }));
+    window.api.getConnectionStatus().then(setConnected);
   }, []);
 
-  if (state.connected === undefined) {
+  if (connected === undefined) {
     return (
       <div className="flex items-center justify-center h-screen">
         <span className="loading loading-spinner loading-lg"></span>
@@ -39,15 +31,11 @@ function AuthGate({ children }: { children: React.ReactNode }): JSX.Element {
     );
   }
 
-  if (!state.connected) {
+  if (!connected) {
     return <Navigate to="/onboarding" replace />;
   }
 
-  return (
-    <LicenseProvider initialLicense={state.license ?? { active: false }}>
-      {children}
-    </LicenseProvider>
-  );
+  return <>{children}</>;
 }
 
 export default function App(): JSX.Element {

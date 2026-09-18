@@ -1,26 +1,12 @@
 import { ipcMain, shell } from "electron";
 import { IPC } from "@shared/ipc";
-import { isLicenseKey, isString } from "@shared/validation";
-import { activateLicense, getLicenseStatus, deleteLicense, applyAutoLaunch } from "../services/settings";
-import { saveSetting } from "../services/settings";
+import { isString } from "@shared/validation";
+import { applyAutoLaunch, saveSetting } from "../services/settings";
 import { getGlobalSetting, saveGlobalSetting } from "../services/globalSettings";
 import { buildAppSettings } from "../services/appSettings";
 import { dataLog } from "../utils/log";
 
 export function registerSettingsHandlers(): void {
-  // --- License ---
-
-  ipcMain.handle(IPC.activateLicense, async (_event, key: unknown) => {
-    if (!isLicenseKey(key)) throw new Error("Invalid license key");
-    return activateLicense(key);
-  });
-
-  ipcMain.handle(IPC.getLicenseStatus, () => getLicenseStatus());
-
-  ipcMain.handle(IPC.deactivateLicense, () => {
-    deleteLicense();
-  });
-
   // --- App settings ---
 
   ipcMain.on(IPC.getSettings, (event) => {

@@ -1,16 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import makeBlockie from "ethereum-blockies-base64";
-import { HelpCircle, Lock, Moon, Sun } from "lucide-react";
-import {
-  FREE_TIER_SYNC_DAYS,
-  type AccountInfo,
-  type EmailConnection,
-  type LicenseStatus,
-  type WhitelistEntry,
+import { HelpCircle, Moon, Sun } from "lucide-react";
+import type {
+  AccountInfo,
+  EmailConnection,
+  WhitelistEntry,
 } from "@shared/types";
 import { formatBytes } from "@shared/formatting";
-import { useLicense, useRefreshLicense } from "../context/LicenseContext";
 import {
   ProviderSelect,
   GmailConnect,
@@ -40,11 +37,6 @@ export default function Settings(): JSX.Element {
   const [launchMinimized, setLaunchMinimized] = useState(() => !!window.api.getSettings().launchMinimized);
   const [colorTheme, setColorTheme] = useState<ColorTheme>(readColorTheme);
   const [showResyncModal, setShowResyncModal] = useState(false);
-  const [licenseKey, setLicenseKey] = useState("");
-  const license = useLicense();
-  const refreshLicense = useRefreshLicense();
-  const [licenseLoading, setLicenseLoading] = useState(false);
-  const [licenseError, setLicenseError] = useState("");
   const [showWipeModal, setShowWipeModal] = useState(false);
   const [wipeInProgress, setWipeInProgress] = useState(false);
   const [deletionError, setDeletionError] = useState("");
@@ -64,7 +56,6 @@ export default function Settings(): JSX.Element {
   const [addAccountView, setAddAccountView] =
     useState<AddAccountView>("provider");
   const [addAccountCopyFirst, setAddAccountCopyFirst] = useState(false);
-  const licenseSectionRef = useRef<HTMLDivElement>(null);
 
   const fetchWhitelist = async (): Promise<void> => {
     const entries = await window.api.getWhitelistEntries();
@@ -103,32 +94,6 @@ export default function Settings(): JSX.Element {
     fetchWhitelist();
   };
 
-  const handleActivateLicense = async (): Promise<void> => {
-    const key = licenseKey.trim();
-    if (!key) return;
-    setLicenseLoading(true);
-    setLicenseError("");
-    try {
-      const status = await window.api.activateLicense(key);
-      await refreshLicense();
-      if (!status.active) {
-        setLicenseError("Invalid or expired license key.");
-      } else {
-        setLicenseKey("");
-        window.api.startSync();
-      }
-    } catch (err) {
-      setLicenseError(err instanceof Error ? err.message : "Activation failed");
-    } finally {
-      setLicenseLoading(false);
-    }
-  };
-
-  const handleDeactivateLicense = async (): Promise<void> => {
-    await window.api.deactivateLicense();
-    await refreshLicense();
-  };
-
   const handleResync = async (): Promise<void> => {
     await window.api.resyncData();
     setShowResyncModal(false);
@@ -161,12 +126,7 @@ export default function Settings(): JSX.Element {
     }
   };
 
-  const handleAddAccount = async (): Promise<void> => {
-    const result = await window.api.addAccount();
-    if (result?.blocked && result.reason === "license_required") {
-      licenseSectionRef.current?.scrollIntoView({ behavior: "smooth" });
-      return;
-    }
+  const handleAddAccount = (): void => {
     setAddAccountView("provider");
     setShowAddAccountModal(true);
   };
@@ -200,13 +160,6 @@ export default function Settings(): JSX.Element {
       hour: "numeric",
       minute: "2-digit",
     });
-  };
-
-  const tierLabel = (status: LicenseStatus): string => {
-    if (!status.active) return "Free";
-    if (status.tier === "lifetime") return "Lifetime";
-    if (status.tier === "test") return "Test";
-    return "Licensed";
   };
 
   const connectionHealthy = !!connection;
@@ -251,7 +204,6 @@ export default function Settings(): JSX.Element {
   };
 
   const actionBusy = switchingEmail !== null || removeInProgress;
-  const needsLicense = !license.active && accounts.length >= 1;
 
   return (
     <div className="space-y-6 max-w-xl">
@@ -364,17 +316,11 @@ export default function Settings(): JSX.Element {
 
           <div className="flex items-center gap-3 pt-1">
             <button
-              className={`btn btn-sm w-fit ${needsLicense ? "btn-ghost" : "btn-primary"}`}
+              className="btn btn-sm btn-primary w-fit"
               onClick={handleAddAccount}
             >
-              {needsLicense && <Lock className="w-3.5 h-3.5" />}
               Add account
             </button>
-            {needsLicense && (
-              <span className="text-xs text-base-content/50">
-                *requires a license
-              </span>
-            )}
             <button
               type="button"
               className="btn btn-link btn-sm px-0"
@@ -386,101 +332,7 @@ export default function Settings(): JSX.Element {
         </div>
       </div>
 
-      {/* Section 2: License */}
-      <div ref={licenseSectionRef} className="card bg-base-200">
-        <div className="card-body space-y-4">
-          <h3 className="font-semibold">License</h3>
-
-          {account && (
-            <>
-              {license.active ? (
-                <div className="space-y-2">
-                  <div className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
-                    <span className="text-base-content/50">Type</span>
-                    <span>{tierLabel(license)}</span>
-
-                    <span className="text-base-content/50">Key</span>
-                    <span className="font-mono">
-                      {license.key
-                        ? `XXXX-XXXX-${license.key.slice(-4)}`
-                        : ""}
-                    </span>
-
-                    {license.expiresAt && (
-                      <>
-                        <span className="text-base-content/50">Expires</span>
-                        <span>
-                          {new Date(license.expiresAt).toLocaleDateString()}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={() =>
-                        window.api.openExternal(
-                          license.portalUrl || "https://paperweight.email",
-                        )
-                      }
-                    >
-                      Manage
-                    </button>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={handleDeactivateLicense}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <p className="text-sm text-base-content/60">
-                    Activate a license key to unlock full email history sync and multi-account support.
-                  </p>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      className="input input-bordered input-sm flex-1"
-                      placeholder="License key"
-                      value={licenseKey}
-                      onChange={(e) => setLicenseKey(e.target.value)}
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && handleActivateLicense()
-                      }
-                    />
-                    <button
-                      className="btn btn-primary btn-sm"
-                      disabled={licenseLoading || !licenseKey.trim()}
-                      onClick={handleActivateLicense}
-                    >
-                      {licenseLoading ? (
-                        <span className="loading loading-spinner loading-xs" />
-                      ) : (
-                        "Activate"
-                      )}
-                    </button>
-                  </div>
-                  {licenseError && (
-                    <p className="text-xs text-error">{licenseError}</p>
-                  )}
-                  <button
-                    className="btn btn-ghost btn-sm w-fit"
-                    onClick={() =>
-                      window.api.openExternal("https://paperweight.email")
-                    }
-                  >
-                    Buy License
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Section 3: Sync */}
+      {/* Section 2: Sync */}
       <div className="card bg-base-200">
         <div className="card-body space-y-3">
           <h3 className="font-semibold">Sync</h3>
@@ -503,7 +355,7 @@ export default function Settings(): JSX.Element {
                 <span>{account.totalMessages.toLocaleString()}</span>
 
                 <span className="text-base-content/50">Sync period</span>
-                <span>{license.active ? "Full history" : `${FREE_TIER_SYNC_DAYS} days`}</span>
+                <span>Full history</span>
               </div>
 
               {(account.providerType === "gmail" ||
@@ -529,7 +381,7 @@ export default function Settings(): JSX.Element {
         </div>
       </div>
 
-      {/* Section 4: App Settings */}
+      {/* Section 3: App Settings */}
       <div className="card bg-base-200">
         <div className="card-body space-y-3">
           <h3 className="font-semibold">App Settings</h3>
@@ -575,7 +427,7 @@ export default function Settings(): JSX.Element {
         </div>
       </div>
 
-      {/* Section 5: Whitelist */}
+      {/* Section 4: Whitelist */}
       <div className="card bg-base-200">
         <div className="card-body space-y-3">
           <h3 className="font-semibold">Whitelist</h3>
@@ -618,7 +470,7 @@ export default function Settings(): JSX.Element {
         </div>
       </div>
 
-      {/* Section 6: Danger Zone */}
+      {/* Section 5: Danger Zone */}
       <div className="card bg-base-200 border border-error/30">
         <div className="card-body space-y-4">
           <h3 className="font-semibold text-error">Danger Zone</h3>
@@ -636,8 +488,8 @@ export default function Settings(): JSX.Element {
           </div>
           <div>
             <p className="text-sm text-base-content/60">
-              Delete everything including all accounts, emails, settings,
-              stored credentials, and your license.
+              Delete everything including all accounts, emails, settings and
+              stored credentials.
             </p>
             <button
               className="btn btn-error btn-sm w-fit mt-2"
@@ -788,7 +640,6 @@ export default function Settings(): JSX.Element {
               <span className="font-medium">{removeAccountEmail}</span>, including
               synced emails and settings.
             </p>
-            <p className="py-4">Your license is not affected.</p>
             {deletionError && (
               <p className="text-sm text-error">{deletionError}</p>
             )}
@@ -852,8 +703,8 @@ export default function Settings(): JSX.Element {
             <h3 className="font-bold text-lg">Wipe all data?</h3>
             <p className="py-4">
               This will permanently delete <strong>all accounts</strong>,
-              synced emails, credentials, settings, and your license. This
-              action cannot be undone.
+              synced emails, credentials and settings. This action cannot be
+              undone.
             </p>
             {deletionError && (
               <p className="text-sm text-error">{deletionError}</p>

@@ -30,7 +30,6 @@ import {
   stopAllSyncs,
   stopSync,
 } from "../sync-manager";
-import { getLicenseStatus, deleteLicense } from "../services/settings";
 import { getDashboardStats } from "../services/stats";
 import {
   deleteCredentials,
@@ -139,21 +138,6 @@ export function registerAccountHandlers(): void {
   ipcMain.handle(IPC.getEmailConnection, () => getEmailConnection());
 
   // --- Multi-account management ---
-
-  // Pre-flight license check before the renderer starts an OAuth flow.
-  // Intentionally two-step: this returns immediately so the renderer can show
-  // the license modal inline, then the actual auth IPC (startGmailAuth etc.)
-  // is called separately once the user is cleared to proceed.
-  ipcMain.handle(IPC.addAccount, () => {
-    const existing = listAccounts();
-    if (existing.length >= 1) {
-      const license = getLicenseStatus();
-      if (!license.active) {
-        return { blocked: true, reason: "license_required" };
-      }
-    }
-    return null;
-  });
 
   ipcMain.on(IPC.listAccounts, (event) => {
     const activeEmail = getActiveEmail();
@@ -314,12 +298,13 @@ export function registerAccountHandlers(): void {
       for (const acc of accounts) deleteCredentials(acc.email);
       deleteCredentials("__staging__");
 
-      for (const file of ["accounts.json", "settings.json"]) {
+      // license.enc is a leftover from builds that shipped a paid tier; remove
+      // it too so a wipe really leaves nothing behind.
+      for (const file of ["accounts.json", "settings.json", "license.enc"]) {
         const filePath = join(userData, file);
         if (existsSync(filePath)) unlinkSync(filePath);
       }
 
-      deleteLicense();
       wipeGlobalDatabase();
     } catch {
       throw new Error("Could not wipe all local data. Try again.");
@@ -334,7 +319,6 @@ export function registerAccountHandlers(): void {
 
   ipcMain.handle(IPC.getSupportInfo, (): SupportInfo => {
     const creds = loadCredentials();
-    const license = getLicenseStatus();
     const stats = getDashboardStats();
     const syncState = getSyncState();
 
@@ -347,7 +331,6 @@ export function registerAccountHandlers(): void {
       arch: os.arch(),
       platform: process.platform,
       providerType: creds?.providerType || "none",
-      licenseActive: license.active,
       totalMessages: stats.totalMessages,
       lastSyncAt: syncState.last_sync_at,
       logPath: getFileLogPath() || join(app.getPath("logs"), "main.log"),

@@ -16,7 +16,6 @@ import {
   invalidateAnalysisPassAtPath,
   needsAnalysisPass,
 } from "./services/analysis";
-import { getLicenseStatus } from "./services/settings";
 import log, { syncLog } from "./utils/log";
 import type { SyncStatus } from "@shared/types";
 
@@ -166,14 +165,9 @@ function startWorker(key: string, mode: WorkerMode): boolean {
   const enforcementDbPath = is.dev
     ? join(app.getAppPath(), "resources", "enforcement.db")
     : join(process.resourcesPath, "enforcement.db");
-  const licensed = mode === "sync" && getLicenseStatus().active;
 
   if (mode === "sync") {
-    syncLog.info(
-      `[${accountTag(key)}] Refresh starting — ${
-        licensed ? "licensed" : "incremental only (no license)"
-      }`,
-    );
+    syncLog.info(`[${accountTag(key)}] Refresh starting`);
   } else {
     syncLog.info(`[${accountTag(key)}] Message analysis starting`);
     activeAnalysisAccount = key;
@@ -197,7 +191,6 @@ function startWorker(key: string, mode: WorkerMode): boolean {
       breachesDbPath,
       enforcementDbPath,
       credentials,
-      licensed,
       mode,
     },
   });

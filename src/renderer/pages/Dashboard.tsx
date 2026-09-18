@@ -6,7 +6,6 @@ import type {
   DashboardStats,
   GdprCaseSummary,
 } from "@shared/types";
-import { useLicense } from "../context/LicenseContext";
 import TrendChartCard from "../components/TrendChartCard";
 import ImpactBlock from "../components/ImpactBlock";
 import { AlertTriangle, ArrowRight, ChevronRight, Contact, FolderClosed, Inbox, Mail } from "lucide-react";
@@ -28,7 +27,6 @@ export default function Dashboard(): JSX.Element {
     series: [],
     markers: [],
   });
-  const license = useLicense();
   const [loading, setLoading] = useState(true);
   const [impactKey] = useState(0);
   const [account, setAccount] = useState<AccountInfo>();
@@ -76,26 +74,6 @@ export default function Dashboard(): JSX.Element {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Dashboard</h1>
-
-      {!license.active && (
-        <div
-          className="flex items-center justify-between p-4 bg-primary/10 border border-primary/20 rounded-box cursor-pointer hover:bg-primary/15 transition-colors"
-          onClick={() => navigate("/settings")}
-        >
-          <div>
-            <p className="font-semibold text-base-content">
-              Upgrade your account
-            </p>
-            <p className="text-sm text-base-content/60">
-              Activate a license to unlock full email history sync and more.
-            </p>
-          </div>
-          <ArrowRight
-            className="w-5 h-5 text-primary shrink-0"
-            aria-hidden="true"
-          />
-        </div>
-      )}
 
       {needsSmtpSetup && (
         <div

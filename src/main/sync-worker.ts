@@ -12,7 +12,6 @@ const {
   breachesDbPath,
   enforcementDbPath,
   credentials,
-  licensed,
   mode,
 } = workerData as {
   dbPath: string;
@@ -20,7 +19,6 @@ const {
   breachesDbPath: string;
   enforcementDbPath: string;
   credentials: StoredCredentials | null;
-  licensed: boolean;
   mode: "sync" | "profile-analysis";
 };
 
@@ -35,7 +33,7 @@ setProgressEmitter((status: SyncStatus) => {
 const run =
   mode === "profile-analysis"
     ? () => runAnalysisPass()
-    : () => runSync(licensed);
+    : () => runSync();
 
 run()
   .then(() => parentPort!.postMessage({ type: "done" }))

@@ -65,9 +65,9 @@ export type CategoryId =
 export const DEFAULT_CATEGORY: CategoryId = "unknown";
 export const DEFAULT_RISK: RiskLevel = "unknown";
 
-// Incremental sync windows
-export const FREE_TIER_SYNC_DAYS = 90;    // Free tier: 90-day window
-export const LICENSED_SYNC_DAYS = 365;    // Licensed: 1-year window on first run
+// Incremental sync window on first run. The historical walk then backfills the
+// rest of the mailbox.
+export const INITIAL_SYNC_DAYS = 365;
 
 // Message processing
 export const BODY_PREVIEW_LENGTH = 150;
@@ -532,14 +532,6 @@ export interface Settings {
   colorTheme?: "dim" | "silk";
 }
 
-export interface LicenseStatus {
-  active: boolean;
-  tier?: "test" | "lifetime";
-  expiresAt?: string;
-  key?: string;
-  portalUrl?: string;
-}
-
 export interface SupportInfo {
   appVersion: string;
   electronVersion: string;
@@ -549,7 +541,6 @@ export interface SupportInfo {
   arch: string;
   platform: string;
   providerType: string;
-  licenseActive: boolean;
   totalMessages: number;
   lastSyncAt?: number;
   logPath: string;

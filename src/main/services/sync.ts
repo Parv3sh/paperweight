@@ -19,12 +19,7 @@ import {
   persistFindings,
   runReclassifyPass,
 } from "./analysis";
-import {
-  getSetting,
-  saveSetting,
-  hasValidLicense,
-  getLicenseStatus,
-} from "./settings";
+import { getSetting, saveSetting } from "./settings";
 import { syncCaseRepliesForVendors } from "./cases";
 import { loadCredentials } from "../credentials";
 import { getProvider } from "../providers/ProviderFactory";
@@ -32,7 +27,7 @@ import { friendlyConnectionError } from "../providers/utils";
 import { PERSONAL_DOMAINS } from "@paperweight/analysis/contracts";
 import { getRootDomain } from "@shared/utils";
 import type { SyncStatus } from "@shared/types";
-import { FREE_TIER_SYNC_DAYS, LICENSED_SYNC_DAYS } from "@shared/types";
+import { INITIAL_SYNC_DAYS } from "@shared/types";
 import { syncLog } from "../utils/log";
 import type { EmailMessage, EmailProvider } from "../providers/types";
 import {
@@ -259,39 +254,31 @@ async function runRemovalPass(provider: EmailProvider): Promise<void> {
 // The IMAP all-mail switch clears messages (UIDs change namespace), but vendors and
 // action_log survive. Once the re-sync has repopulated messages, re-apply per-message
 // "unsubscribed" status from the action_log. Runs while the flag is set (idempotent);
-// cleared once backfill is complete (historical for licensed, first incremental for free).
+// cleared once the historical backfill is complete.
 const REAPPLY_UNSUB_FLAG = "migration:reapply-unsub";
 
-function maybeReapplyUnsubscribed(licensed: boolean): void {
+function maybeReapplyUnsubscribed(): void {
   if (getSetting(REAPPLY_UNSUB_FLAG) !== "1") return;
   reapplyUnsubscribedFromActionLog();
   const syncState = getSyncState();
-  const backfillComplete = licensed
-    ? syncState.historical_done
-    : !!syncState.quick_sync_done_at;
-  if (backfillComplete) saveSetting(REAPPLY_UNSUB_FLAG, "0");
+  if (syncState.historical_done) saveSetting(REAPPLY_UNSUB_FLAG, "0");
 }
 
 // --- Incremental sync ---
-// First run: fetches last FREE_TIER_SYNC_DAYS (free) or LICENSED_SYNC_DAYS (licensed) days.
-// Subsequent runs: date-based since last_sync_at (minus a small overlap). Removals are
-// applied separately by runRemovalPass().
+// First run: fetches the last INITIAL_SYNC_DAYS days. Subsequent runs: date-based
+// since last_sync_at (minus a small overlap). Removals are applied separately by
+// runRemovalPass().
 
-async function runIncrementalSync(
-  provider: EmailProvider,
-  licensed: boolean,
-): Promise<void> {
+async function runIncrementalSync(provider: EmailProvider): Promise<void> {
   const syncState = getSyncState();
 
   const isFirstRun = !syncState.quick_sync_done_at;
 
-  // First run window: licensed users get 1 year, free users get 90 days.
-  // Subsequent runs use last_sync_at (minus a small overlap) so the window size only
-  // matters on first run.
-  const syncDays = licensed ? LICENSED_SYNC_DAYS : FREE_TIER_SYNC_DAYS;
+  // First run window: one year. Subsequent runs use last_sync_at (minus a small
+  // overlap) so the window size only matters on first run.
   const since = syncState.last_sync_at
     ? new Date(syncState.last_sync_at - INCREMENTAL_OVERLAP_MS)
-    : new Date(Date.now() - syncDays * 86_400_000);
+    : new Date(Date.now() - INITIAL_SYNC_DAYS * 86_400_000);
 
   syncLog.info(
     `Incremental sync: since ${since.toISOString()} (${isFirstRun ? "first run" : "incremental"})`,
@@ -483,7 +470,7 @@ async function runHistoricalChunk(
 
 // --- Main entry point ---
 
-export async function runSync(licensedOverride?: boolean): Promise<void> {
+export async function runSync(): Promise<void> {
   if (currentStatus.running) {
     syncLog.warn("Sync skipped (already running)");
     return;
@@ -524,56 +511,44 @@ export async function runSync(licensedOverride?: boolean): Promise<void> {
     const connection = await provider.connect();
     syncLog.info(`Provider connected (${connection.type})`);
 
-    // getLicenseStatus() calls loadLicense() which uses safeStorage — unavailable in
-    // worker threads. When licensedOverride is provided (worker context), skip it entirely.
-    let licensed: boolean;
-    if (licensedOverride !== undefined) {
-      licensed = licensedOverride;
-    } else {
-      const licenseStatus = getLicenseStatus();
-      licensed = licenseStatus.active && (await hasValidLicense());
-    }
-
-    // Phase 1: Incremental sync (always runs — window is 90d free / 365d licensed on first run)
-    await runIncrementalSync(provider, licensed);
+    // Phase 1: Incremental sync (always runs — one-year window on first run)
+    await runIncrementalSync(provider);
 
     // Phase 1.5: Apply removals (deletions / moves out of the tracked folder) for
     // providers with a delta layer (Gmail, Microsoft). No-op for IMAP.
     await runRemovalPass(provider);
 
-    // Phase 2: Historical sync (licensed users only). Full fetch, same as
-    // incremental — bodies and findings land for history too. Isolated empty
-    // chunks are crossed; three consecutive empty chunks finish the walk.
-    if (licensed) {
-      const syncState = getSyncState();
-      if (
-        !syncState.historical_done &&
-        syncState.historical_cursor !== undefined
-      ) {
-        syncLog.info("Starting historical sync");
-        let hasMore = true;
-        let historicalMessages = 0;
-        let historicalChunks = 0;
-        let emptyChunks = 0;
-        while (hasMore) {
-          const result = await runHistoricalChunk(provider);
-          hasMore = result.hasMore;
-          historicalMessages += result.count;
-          historicalChunks++;
-          emptyChunks = result.count === 0 ? emptyChunks + 1 : 0;
-          if (hasMore && emptyChunks >= HISTORICAL_EMPTY_CHUNK_LIMIT) {
-            recomputeAllVendorFlags();
-            updateSyncState({ historical_done: 1 });
-            syncLog.info(
-              `Historical sync: no messages in ${HISTORICAL_EMPTY_CHUNK_LIMIT} consecutive chunks, stopping early`,
-            );
-            break;
-          }
+    // Phase 2: Historical sync. Full fetch, same as incremental — bodies and
+    // findings land for history too. Isolated empty chunks are crossed; three
+    // consecutive empty chunks finish the walk.
+    const historicalState = getSyncState();
+    if (
+      !historicalState.historical_done &&
+      historicalState.historical_cursor !== undefined
+    ) {
+      syncLog.info("Starting historical sync");
+      let hasMore = true;
+      let historicalMessages = 0;
+      let historicalChunks = 0;
+      let emptyChunks = 0;
+      while (hasMore) {
+        const result = await runHistoricalChunk(provider);
+        hasMore = result.hasMore;
+        historicalMessages += result.count;
+        historicalChunks++;
+        emptyChunks = result.count === 0 ? emptyChunks + 1 : 0;
+        if (hasMore && emptyChunks >= HISTORICAL_EMPTY_CHUNK_LIMIT) {
+          recomputeAllVendorFlags();
+          updateSyncState({ historical_done: 1 });
+          syncLog.info(
+            `Historical sync: no messages in ${HISTORICAL_EMPTY_CHUNK_LIMIT} consecutive chunks, stopping early`,
+          );
+          break;
         }
-        syncLog.info(
-          `Historical sync complete: ${historicalMessages} messages in ${historicalChunks} chunks`,
-        );
       }
+      syncLog.info(
+        `Historical sync complete: ${historicalMessages} messages in ${historicalChunks} chunks`,
+      );
     }
 
     // Catalogue enrichment is global, static work. Run it once after both sync
@@ -584,7 +559,7 @@ export async function runSync(licensedOverride?: boolean): Promise<void> {
     enrichVendorCategories();
 
     // Re-derive "unsubscribed" message status after an all-mail migration re-sync.
-    maybeReapplyUnsubscribed(licensed);
+    maybeReapplyUnsubscribed();
     seedProfileEmailsFromCurrentAccount(getDb());
 
     await provider.disconnect();
