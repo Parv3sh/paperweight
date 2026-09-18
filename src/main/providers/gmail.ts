@@ -11,6 +11,7 @@ import {
   gmailRetryDelayMs,
   isRetryableGmailResponse,
 } from "./gmail-retry";
+import { mapWithConcurrency } from "./concurrency";
 
 // Injected at build time via electron-vite define.
 // Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars before building.
@@ -25,6 +26,13 @@ const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 
 const SCOPES_MODIFY =
   "https://www.googleapis.com/auth/gmail.modify";
+
+// messages.get calls in flight per page. Gmail allows ~250 quota units per
+// user per second and messages.get costs 5, so 6 concurrent fetches at typical
+// latency stay well inside the limit; bursts that do get throttled are absorbed
+// by the retry policy in ./gmail-retry. Sequential fetching of an 80k mailbox
+// took most of a day; this brings it to well under an hour.
+const GMAIL_FETCH_CONCURRENCY = 6;
 
 // --- OAuth ---
 
@@ -438,23 +446,31 @@ export function createGmailProvider(
       }
 
       const estimatedTotal = listResult.resultSizeEstimate;
-      const emailMessages: EmailMessage[] = [];
+      let fetched = 0;
 
-      for (const msgRef of listResult.messages) {
-        try {
-          const msg = (await gmailApiFetch(`/messages/${msgRef.id}`, {
-            format: "full",
-          })) as GmailRawMessage;
-
-          emailMessages.push(await parseGmailMessage(msg, analysisOptions));
-          onProgress?.(emailMessages.length, estimatedTotal);
-        } catch (err) {
-          syncLog.error(`Failed to fetch message ${msgRef.id}:`, err instanceof Error ? err.message : String(err));
-        }
-      }
+      // A failed message is logged and skipped, never fatal to the page; the
+      // retry policy has already had its chances by the time we get here.
+      const fetchedMessages = await mapWithConcurrency(
+        listResult.messages,
+        GMAIL_FETCH_CONCURRENCY,
+        async (msgRef): Promise<EmailMessage | undefined> => {
+          try {
+            const msg = (await gmailApiFetch(`/messages/${msgRef.id}`, {
+              format: "full",
+            })) as GmailRawMessage;
+            const parsed = await parseGmailMessage(msg, analysisOptions);
+            fetched++;
+            onProgress?.(fetched, estimatedTotal);
+            return parsed;
+          } catch (err) {
+            syncLog.error(`Failed to fetch message ${msgRef.id}:`, err instanceof Error ? err.message : String(err));
+            return undefined;
+          }
+        },
+      );
 
       return {
-        messages: emailMessages,
+        messages: fetchedMessages.filter((m): m is EmailMessage => m !== undefined),
         nextPageToken: listResult.nextPageToken,
       };
     },
