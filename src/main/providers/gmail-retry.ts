@@ -18,6 +18,15 @@ export function isRetryableGmailResponse(status: number, body: string): boolean 
   return false;
 }
 
+// True when an error thrown by the provider ("Gmail API error (403): ...") was
+// a throttle that outlived the retries. Such a message must not be skipped: the
+// caller fails the page so the next refresh retries it from the same token.
+export function isGmailThrottleError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/Gmail API error \(429\)/.test(msg)) return true;
+  return /Gmail API error \(403\)/.test(msg) && RATE_LIMIT_REASON.test(msg);
+}
+
 // Prefers Retry-After; otherwise exponential backoff (1s, 2s, 4s, ... capped at
 // 60s) plus up to one second of jitter so parallel workers don't retry in
 // lockstep. Six attempts sum to just over a minute, enough to outlast a

@@ -9,9 +9,11 @@ import { syncLog, authLog } from "../utils/log";
 import {
   GMAIL_MAX_RETRIES,
   gmailRetryDelayMs,
+  isGmailThrottleError,
   isRetryableGmailResponse,
 } from "./gmail-retry";
 import { mapWithConcurrency } from "./concurrency";
+import { RateLimiter } from "./rate-limit";
 
 // Injected at build time via electron-vite define.
 // Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars before building.
@@ -27,11 +29,27 @@ const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const SCOPES_MODIFY =
   "https://www.googleapis.com/auth/gmail.modify";
 
-// messages.get calls in flight per page. Gmail allows ~250 quota units per
-// user per second and messages.get costs 5, so 6 concurrent fetches at typical
-// latency stay well inside the limit; bursts that do get throttled are absorbed
-// by the retry policy in ./gmail-retry. Sequential fetching of an 80k mailbox
-// took most of a day; this brings it to well under an hour.
+// Quota pacing. Google enforces a "Total Query Cost per minute per user" limit
+// on the Gmail API; projects created recently get 6,000 units. Spend a little
+// less than that, spread evenly, so requests are almost never rejected. The
+// small burst capacity keeps a fresh sync from front-loading a minute's budget
+// into its first seconds. Costs per https://developers.google.com/gmail/api/reference/quota
+const GMAIL_UNITS_PER_MINUTE = 5_000;
+const GMAIL_BURST_UNITS = 500;
+const QUOTA_COST = {
+  get: 5,
+  list: 5,
+  modify: 5,
+  trash: 5,
+  send: 100,
+  history: 2,
+  profile: 1,
+} as const;
+const gmailLimiter = new RateLimiter(GMAIL_UNITS_PER_MINUTE, GMAIL_BURST_UNITS);
+
+// messages.get calls in flight per page. Throughput is bounded by the limiter
+// (5,000 units/min = ~16 messages/s); concurrency only needs to be high enough
+// that network latency isn't the bottleneck.
 const GMAIL_FETCH_CONCURRENCY = 6;
 
 // --- OAuth ---
@@ -155,14 +173,18 @@ async function getValidAccessToken(): Promise<string> {
 
 // --- Gmail API helpers ---
 
-// One request with the retry policy from ./gmail-retry. The access token is
-// re-read on every attempt so a refresh that happens mid-backoff is picked up.
+// One request, paced by the quota limiter and covered by the retry policy from
+// ./gmail-retry. Every attempt (retries included) reserves `cost` units, since
+// Google charges rejected calls too. The access token is re-read on every
+// attempt so a refresh that happens mid-backoff is picked up.
 async function gmailRequest(
   url: string,
   init: { method?: string; headers?: Record<string, string>; body?: string },
+  cost: number,
 ): Promise<unknown> {
   let attempt = 0;
   while (true) {
+    await gmailLimiter.acquire(cost);
     const token = await getValidAccessToken();
     const response = await fetch(url, {
       method: init.method,
@@ -179,6 +201,11 @@ async function gmailRequest(
     ) {
       const delay = gmailRetryDelayMs(response.headers.get("Retry-After"), attempt);
       attempt++;
+      if (response.status === 429 || response.status === 403) {
+        // We were throttled despite pacing: hold every in-flight worker, not
+        // just this one, so the whole sync eases off together.
+        gmailLimiter.penalize(delay);
+      }
       syncLog.warn(
         `Gmail API ${response.status}; retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${GMAIL_MAX_RETRIES})`,
       );
@@ -192,7 +219,8 @@ async function gmailRequest(
 
 async function gmailApiFetch(
   path: string,
-  params?: Record<string, string | string[]>
+  params?: Record<string, string | string[]>,
+  cost: number = QUOTA_COST.get,
 ): Promise<unknown> {
   const url = new URL(`${GMAIL_API_BASE}${path}`);
   if (params) {
@@ -205,18 +233,23 @@ async function gmailApiFetch(
     }
   }
 
-  return gmailRequest(url.toString(), {});
+  return gmailRequest(url.toString(), {}, cost);
 }
 
 async function gmailApiPost(
   path: string,
-  body?: Record<string, unknown>
+  body?: Record<string, unknown>,
+  cost: number = QUOTA_COST.modify,
 ): Promise<unknown> {
-  return gmailRequest(`${GMAIL_API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  return gmailRequest(
+    `${GMAIL_API_BASE}${path}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    },
+    cost,
+  );
 }
 
 // --- Profile ---
@@ -448,8 +481,11 @@ export function createGmailProvider(
       const estimatedTotal = listResult.resultSizeEstimate;
       let fetched = 0;
 
-      // A failed message is logged and skipped, never fatal to the page; the
-      // retry policy has already had its chances by the time we get here.
+      // A message that fails for its own reasons (deleted mid-sync, malformed)
+      // is logged and skipped. A throttle that outlived the retries is not: it
+      // fails the page so the caller leaves its page token in place and the
+      // next refresh fetches the same page again, instead of silently losing
+      // messages from the inventory.
       const fetchedMessages = await mapWithConcurrency(
         listResult.messages,
         GMAIL_FETCH_CONCURRENCY,
@@ -463,6 +499,7 @@ export function createGmailProvider(
             onProgress?.(fetched, estimatedTotal);
             return parsed;
           } catch (err) {
+            if (isGmailThrottleError(err)) throw err;
             syncLog.error(`Failed to fetch message ${msgRef.id}:`, err instanceof Error ? err.message : String(err));
             return undefined;
           }
@@ -514,7 +551,7 @@ export function createGmailProvider(
       if (!from) throw new Error("Could not resolve sender address from Gmail profile");
       const raw = buildRfc822Message(from, to, subject, body, inReplyTo);
       const encoded = Buffer.from(raw, "utf-8").toString("base64url");
-      const sent = (await gmailApiPost("/messages/send", { raw: encoded })) as { id?: string };
+      const sent = (await gmailApiPost("/messages/send", { raw: encoded }, QUOTA_COST.send)) as { id?: string };
       // Read the Message-ID back from the sent message — Gmail assigns it
       // server-side, so what we sent is not what went out.
       if (!sent?.id) return undefined;
@@ -537,7 +574,7 @@ export function createGmailProvider(
 
     async getRemovalCursor(): Promise<string | undefined> {
       try {
-        const profile = (await gmailApiFetch("/profile")) as { historyId?: string };
+        const profile = (await gmailApiFetch("/profile", undefined, QUOTA_COST.profile)) as { historyId?: string };
         return profile.historyId;
       } catch {
         return undefined;
@@ -559,7 +596,7 @@ export function createGmailProvider(
           const params: Record<string, string> = { startHistoryId: cursor };
           if (pageToken) params.pageToken = pageToken;
 
-          const result = (await gmailApiFetch("/history", params)) as GmailHistoryResponse;
+          const result = (await gmailApiFetch("/history", params, QUOTA_COST.history)) as GmailHistoryResponse;
 
           // Always update to the latest historyId returned, even if history array is empty
           nextCursor = result.historyId;

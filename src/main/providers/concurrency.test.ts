@@ -52,4 +52,23 @@ describe("mapWithConcurrency", () => {
       }),
     ).rejects.toThrow("boom");
   });
+
+  it("stops starting new items after the first failure but lets in-flight calls finish", async () => {
+    const started: number[] = [];
+    const finished: number[] = [];
+    await expect(
+      mapWithConcurrency([0, 1, 2, 3, 4, 5, 6, 7], 2, async (x) => {
+        started.push(x);
+        await tick();
+        if (x === 1) throw new Error("throttled");
+        await tick();
+        finished.push(x);
+        return x;
+      }),
+    ).rejects.toThrow("throttled");
+    // Item 0 was in flight alongside item 1 and completed; nothing beyond the
+    // two in-flight items was started.
+    expect(started).toEqual([0, 1]);
+    expect(finished).toEqual([0]);
+  });
 });

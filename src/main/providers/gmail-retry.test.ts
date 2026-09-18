@@ -1,6 +1,7 @@
 import {
   GMAIL_MAX_RETRIES,
   gmailRetryDelayMs,
+  isGmailThrottleError,
   isRetryableGmailResponse,
 } from "./gmail-retry";
 
@@ -62,5 +63,18 @@ describe("gmailRetryDelayMs", () => {
       total += gmailRetryDelayMs(null, attempt, 0);
     }
     expect(total).toBeGreaterThanOrEqual(60_000);
+  });
+});
+
+describe("isGmailThrottleError", () => {
+  it("recognises the error the provider throws after retries are exhausted", () => {
+    expect(isGmailThrottleError(new Error(`Gmail API error (403): ${QUOTA_BODY}`))).toBe(true);
+    expect(isGmailThrottleError(new Error("Gmail API error (429): slow down"))).toBe(true);
+  });
+
+  it("leaves other failures to be skipped per message", () => {
+    expect(isGmailThrottleError(new Error("Gmail API error (404): Not Found"))).toBe(false);
+    expect(isGmailThrottleError(new Error("Gmail API error (403): Insufficient Permission"))).toBe(false);
+    expect(isGmailThrottleError(new Error("fetch failed"))).toBe(false);
   });
 });
