@@ -6,6 +6,11 @@ import type { AnalyzeOptions, RawMessage } from "@paperweight/analysis";
 import { BODY_TEXT_MAX_LENGTH } from "@shared/config";
 import { headerRecord } from "@shared/utils";
 import { syncLog, authLog } from "../utils/log";
+import {
+  GMAIL_MAX_RETRIES,
+  gmailRetryDelayMs,
+  isRetryableGmailResponse,
+} from "./gmail-retry";
 
 // Injected at build time via electron-vite define.
 // Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars before building.
@@ -142,11 +147,45 @@ async function getValidAccessToken(): Promise<string> {
 
 // --- Gmail API helpers ---
 
+// One request with the retry policy from ./gmail-retry. The access token is
+// re-read on every attempt so a refresh that happens mid-backoff is picked up.
+async function gmailRequest(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<unknown> {
+  let attempt = 0;
+  while (true) {
+    const token = await getValidAccessToken();
+    const response = await fetch(url, {
+      method: init.method,
+      headers: { ...init.headers, Authorization: `Bearer ${token}` },
+      body: init.body,
+    });
+
+    if (response.ok) return response.json();
+
+    const text = await response.text();
+    if (
+      attempt < GMAIL_MAX_RETRIES &&
+      isRetryableGmailResponse(response.status, text)
+    ) {
+      const delay = gmailRetryDelayMs(response.headers.get("Retry-After"), attempt);
+      attempt++;
+      syncLog.warn(
+        `Gmail API ${response.status}; retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${GMAIL_MAX_RETRIES})`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
+    throw new Error(`Gmail API error (${response.status}): ${text}`);
+  }
+}
+
 async function gmailApiFetch(
   path: string,
   params?: Record<string, string | string[]>
 ): Promise<unknown> {
-  const token = await getValidAccessToken();
   const url = new URL(`${GMAIL_API_BASE}${path}`);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -158,40 +197,18 @@ async function gmailApiFetch(
     }
   }
 
-  const response = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Gmail API error (${response.status}): ${text}`);
-  }
-
-  return response.json();
+  return gmailRequest(url.toString(), {});
 }
 
 async function gmailApiPost(
   path: string,
   body?: Record<string, unknown>
 ): Promise<unknown> {
-  const token = await getValidAccessToken();
-  const url = `${GMAIL_API_BASE}${path}`;
-
-  const response = await fetch(url, {
+  return gmailRequest(`${GMAIL_API_BASE}${path}`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Gmail API error (${response.status}): ${text}`);
-  }
-
-  return response.json();
 }
 
 // --- Profile ---

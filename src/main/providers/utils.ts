@@ -32,6 +32,9 @@ export function friendlyConnectionError(err: unknown): string {
   ) {
     return "Authorization expired. Reconnect your account to continue syncing.";
   }
+  if (/Quota exceeded|rateLimitExceeded|userRateLimitExceeded/i.test(msg)) {
+    return "The mail provider's rate limit was reached. Sync will pick up where it left off on the next refresh.";
+  }
 
   return msg;
 }

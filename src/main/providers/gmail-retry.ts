@@ -1,0 +1,36 @@
+// Retry policy for Gmail API calls. Kept dependency-free so it can be unit
+// tested without loading the provider (which needs build-time OAuth defines).
+//
+// Gmail throttles two ways: HTTP 429, and HTTP 403 whose body names a
+// rate-limit or quota reason ("Quota exceeded for quota metric 'Queries' and
+// limit 'Queries per minute per user'"). Both are per-minute limits that clear
+// on their own, so a first sync of a large mailbox should wait and continue
+// rather than fail. 5xx responses are retried too, per Google's guidance.
+
+export const GMAIL_MAX_RETRIES = 6;
+
+const RATE_LIMIT_REASON =
+  /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|Quota exceeded/i;
+
+export function isRetryableGmailResponse(status: number, body: string): boolean {
+  if (status === 429 || status >= 500) return true;
+  if (status === 403) return RATE_LIMIT_REASON.test(body);
+  return false;
+}
+
+// Prefers Retry-After; otherwise exponential backoff (1s, 2s, 4s, ... capped at
+// 60s) plus up to one second of jitter so parallel workers don't retry in
+// lockstep. Six attempts sum to just over a minute, enough to outlast a
+// per-minute quota window.
+export function gmailRetryDelayMs(
+  retryAfter: string | null,
+  attempt: number,
+  jitter: number = Math.random(),
+): number {
+  if (retryAfter) {
+    const seconds = parseInt(retryAfter, 10);
+    if (!isNaN(seconds) && seconds >= 0) return seconds * 1000;
+  }
+  const base = Math.min(2 ** attempt * 1000, 60_000);
+  return Math.round(base + jitter * 1000);
+}
