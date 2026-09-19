@@ -7,7 +7,10 @@
 // on their own, so a first sync of a large mailbox should wait and continue
 // rather than fail. 5xx responses are retried too, per Google's guidance.
 
-export const GMAIL_MAX_RETRIES = 6;
+// Eight attempts: 1+2+4+8+16+32+60+60s ≈ 3 minutes of patience, enough to
+// outlast a per-minute window that another process (or a previous run of the
+// app) has already saturated.
+export const GMAIL_MAX_RETRIES = 8;
 
 const RATE_LIMIT_REASON =
   /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|Quota exceeded/i;
@@ -29,8 +32,7 @@ export function isGmailThrottleError(err: unknown): boolean {
 
 // Prefers Retry-After; otherwise exponential backoff (1s, 2s, 4s, ... capped at
 // 60s) plus up to one second of jitter so parallel workers don't retry in
-// lockstep. Six attempts sum to just over a minute, enough to outlast a
-// per-minute quota window.
+// lockstep.
 export function gmailRetryDelayMs(
   retryAfter: string | null,
   attempt: number,

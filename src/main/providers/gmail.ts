@@ -14,6 +14,7 @@ import {
 } from "./gmail-retry";
 import { mapWithConcurrency } from "./concurrency";
 import { RateLimiter } from "./rate-limit";
+import { parentPort } from "node:worker_threads";
 
 // Injected at build time via electron-vite define.
 // Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars before building.
@@ -30,21 +31,28 @@ const SCOPES_MODIFY =
   "https://www.googleapis.com/auth/gmail.modify";
 
 // Quota pacing. Google enforces a "Total Query Cost per minute per user" limit
-// on the Gmail API; projects created recently get 6,000 units. Spend a little
-// less than that, spread evenly, so requests are almost never rejected. The
-// small burst capacity keeps a fresh sync from front-loading a minute's budget
-// into its first seconds. Costs per https://developers.google.com/gmail/api/reference/quota
-const GMAIL_UNITS_PER_MINUTE = 5_000;
-const GMAIL_BURST_UNITS = 500;
+// on the Gmail API; projects created recently get 6,000 units, measured over a
+// rolling window. This module is loaded twice per account: once in the sync
+// worker and once in the main process for user actions (trash, spam, send).
+// Each gets its own budget, sized so the two together stay under the limit
+// with headroom for the rolling-window slop. Small burst capacities keep a
+// fresh sync or a click from front-loading a minute's budget into seconds.
+// Costs per https://developers.google.com/gmail/api/reference/quota
+const IN_SYNC_WORKER = parentPort !== null;
+const GMAIL_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 4_000 : 1_000;
+const GMAIL_BURST_UNITS = IN_SYNC_WORKER ? 100 : 200;
 const QUOTA_COST = {
   get: 5,
   list: 5,
   modify: 5,
   trash: 5,
+  batchModify: 50,
   send: 100,
   history: 2,
   profile: 1,
 } as const;
+// batchModify accepts at most 1000 ids per call.
+const BATCH_MODIFY_MAX_IDS = 1000;
 const gmailLimiter = new RateLimiter(GMAIL_UNITS_PER_MINUTE, GMAIL_BURST_UNITS);
 
 // messages.get calls in flight per page. Throughput is bounded by the limiter
@@ -192,7 +200,11 @@ async function gmailRequest(
       body: init.body,
     });
 
-    if (response.ok) return response.json();
+    if (response.ok) {
+      // batchModify answers 204 with no body; everything else returns JSON.
+      const text = await response.text();
+      return text ? JSON.parse(text) : undefined;
+    }
 
     const text = await response.text();
     if (
@@ -250,6 +262,25 @@ async function gmailApiPost(
     },
     cost,
   );
+}
+
+async function batchModify(
+  messageIds: string[],
+  addLabelIds: string[],
+  removeLabelIds: string[],
+): Promise<void> {
+  for (let i = 0; i < messageIds.length; i += BATCH_MODIFY_MAX_IDS) {
+    const ids = messageIds.slice(i, i + BATCH_MODIFY_MAX_IDS);
+    await gmailRequest(
+      `${GMAIL_API_BASE}/messages/batchModify`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids, addLabelIds, removeLabelIds }),
+      },
+      QUOTA_COST.batchModify,
+    );
+  }
 }
 
 // --- Profile ---
@@ -529,6 +560,18 @@ export function createGmailProvider(
         addLabelIds: ["SPAM"],
         removeLabelIds: ["INBOX"],
       });
+    },
+
+    // Vendor-wide actions go through batchModify: 50 quota units per call of
+    // up to 1000 ids, against 5 units per message one at a time. Trashing a
+    // 500-message vendor drops from 2,500 units (half the per-minute quota)
+    // to 50, and from minutes to a second.
+    async trashMessages(messageIds: string[]): Promise<void> {
+      await batchModify(messageIds, ["TRASH"], ["INBOX"]);
+    },
+
+    async markManyAsSpam(messageIds: string[]): Promise<void> {
+      await batchModify(messageIds, ["SPAM"], ["INBOX"]);
     },
 
     async markAsRead(messageId: string, isRead: boolean): Promise<void> {

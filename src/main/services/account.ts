@@ -442,7 +442,23 @@ async function bulkActionVendorMessages(
       try {
         await p.connect();
         actionLog.info(`${label}: processing ${ids.length} messages for vendor ${vendorId}`);
-        for (const id of ids) {
+
+        // One batch call where the provider offers it (Gmail: 50 quota units
+        // per 1000 messages instead of 5 each). If the batch fails for any
+        // reason, fall back to the per-message path so nothing is left undone.
+        const batch = actionType === "trashed" ? p.trashMessages : p.markManyAsSpam;
+        let remaining = ids;
+        if (batch) {
+          try {
+            await batch.call(p, ids);
+            remaining = [];
+            actionLog.info(`${label}: batch applied to ${ids.length} messages for vendor ${vendorId}`);
+          } catch (err) {
+            actionLog.warn(`${label}: batch failed, falling back to per-message (vendor ${vendorId}): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        for (const id of remaining) {
           try {
             if (actionType === "trashed") {
               await p.trashMessage(id);

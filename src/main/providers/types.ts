@@ -66,6 +66,12 @@ export interface EmailProvider {
   markAsSpam(messageId: string): Promise<void>;
   markAsRead(messageId: string, isRead: boolean): Promise<void>;
 
+  // Optional bulk forms for vendor-wide actions. Providers with a cheap batch
+  // endpoint (Gmail batchModify) implement these; callers fall back to the
+  // per-message operations when absent or when the batch call fails.
+  trashMessages?(messageIds: string[]): Promise<void>;
+  markManyAsSpam?(messageIds: string[]): Promise<void>;
+
   // Send a plain-text email from the connected account. Resolves with the
   // sent mail's RFC Message-ID when the provider can determine it (used to
   // thread-match replies to GDPR cases), else undefined. When inReplyTo is

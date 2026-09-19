@@ -75,7 +75,11 @@ import {
   startGmailAuthAndRecordAccount,
   startMicrosoftAuthAndRecordAccount,
   saveImapConfigAndRecordAccount,
+  trashVendorMessages,
+  spamVendorMessages,
 } from "./account";
+import { getProvider } from "../providers/ProviderFactory";
+import { getMessageIdsByVendor, deleteVendorMessages } from "./messages";
 
 describe("account authentication", () => {
   beforeEach(() => {
@@ -236,5 +240,83 @@ describe("account authentication", () => {
     expect(mockRegisterAccount).not.toHaveBeenCalled();
     expect(mockCreateAccountDb).not.toHaveBeenCalled();
     expect(mockReconnectDb).not.toHaveBeenCalled();
+  });
+});
+
+describe("vendor bulk actions", () => {
+  const mockGetProvider = getProvider as jest.Mock;
+  const mockGetMessageIds = getMessageIdsByVendor as jest.Mock;
+  const mockDeleteVendorMessages = deleteVendorMessages as jest.Mock;
+  const ids = ["m1", "m2", "m3"];
+
+  // The provider work runs detached after the handler returns; let the
+  // microtask/immediate queue drain so its effects are observable.
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  }
+
+  function provider(overrides: Record<string, jest.Mock> = {}) {
+    return {
+      connect: jest.fn(async () => ({ type: "gmail-oauth", email: "a@b.c" })),
+      disconnect: jest.fn(async () => {}),
+      trashMessage: jest.fn(async () => {}),
+      markAsSpam: jest.fn(async () => {}),
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetMessageIds.mockReturnValue(ids);
+    mockDeleteVendorMessages.mockReturnValue({ count: ids.length, sizeBytes: 300 });
+  });
+
+  it("trashes a vendor with one batch call when the provider offers it", async () => {
+    const p = provider({ trashMessages: jest.fn(async () => {}) });
+    mockGetProvider.mockReturnValue(p);
+
+    await trashVendorMessages(7);
+    await flush();
+
+    expect(p.trashMessages).toHaveBeenCalledTimes(1);
+    expect(p.trashMessages).toHaveBeenCalledWith(ids);
+    expect(p.trashMessage).not.toHaveBeenCalled();
+    expect(mockDeleteVendorMessages).toHaveBeenCalledWith(7, undefined);
+  });
+
+  it("falls back to per-message trash when the batch call fails", async () => {
+    const p = provider({
+      trashMessages: jest.fn(async () => {
+        throw new Error("Gmail API error (400): bad label");
+      }),
+    });
+    mockGetProvider.mockReturnValue(p);
+
+    await trashVendorMessages(7);
+    await flush();
+
+    expect(p.trashMessage).toHaveBeenCalledTimes(ids.length);
+    expect(mockDeleteVendorMessages).toHaveBeenCalledWith(7, undefined);
+  });
+
+  it("uses per-message calls for providers without a batch operation", async () => {
+    const p = provider();
+    mockGetProvider.mockReturnValue(p);
+
+    await trashVendorMessages(7);
+    await flush();
+
+    expect(p.trashMessage).toHaveBeenCalledTimes(ids.length);
+  });
+
+  it("reports spam through the batch form too", async () => {
+    const p = provider({ markManyAsSpam: jest.fn(async () => {}) });
+    mockGetProvider.mockReturnValue(p);
+
+    await spamVendorMessages(7);
+    await flush();
+
+    expect(p.markManyAsSpam).toHaveBeenCalledWith(ids);
+    expect(p.markAsSpam).not.toHaveBeenCalled();
   });
 });

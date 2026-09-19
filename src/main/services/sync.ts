@@ -398,12 +398,11 @@ async function runHistoricalChunk(
     isLastChunk = true;
   }
 
-  syncLog.debug(
-    `Historical chunk: ${since.toISOString().slice(0, 10)} → ${until.toISOString().slice(0, 10)}`,
-  );
+  const chunkRange = `${since.toISOString().slice(0, 10)} → ${until.toISOString().slice(0, 10)}`;
   const chunkStart = Date.now();
 
   const chunkEstimate = (await provider.getMessageCount(since, until)) ?? 0;
+  syncLog.info(`Historical chunk ${chunkRange}: starting (~${chunkEstimate} messages)`);
 
   emitProgress({
     running: true,
@@ -414,11 +413,15 @@ async function runHistoricalChunk(
     historicalCursor: since.getTime(),
   });
 
-  // Paginate through all messages in this date-range chunk.
+  // Paginate through all messages in this date-range chunk. Counts only in the
+  // log — never a subject, sender or body.
   let pageToken: string | undefined;
   let totalFetched = 0;
+  let pageNum = 0;
 
   while (true) {
+    pageNum++;
+    syncLog.info(`Historical page ${pageNum} (${chunkRange}): fetching...`);
     const result = await provider.listMessages(
       since,
       until,
@@ -439,6 +442,9 @@ async function runHistoricalChunk(
       processMessagesBatch(result.messages);
       totalFetched += result.messages.length;
     }
+    syncLog.info(
+      `Historical page ${pageNum}: ${result.messages.length} messages (${totalFetched} so far in chunk)`,
+    );
 
     if (result.nextPageToken) {
       pageToken = result.nextPageToken;
@@ -447,13 +453,10 @@ async function runHistoricalChunk(
     }
   }
 
-  // Counts and elapsed time only — never a subject, sender or body. This is the
-  // number that tells us whether the walk is fetch-bound or engine-bound.
+  // Counts and elapsed time only. This is the number that tells us whether the
+  // walk is fetch-bound or engine-bound.
   const chunkSeconds = ((Date.now() - chunkStart) / 1000).toFixed(0);
-  syncLog.info(
-    `Historical chunk ${since.toISOString().slice(0, 10)} → ${until.toISOString().slice(0, 10)}` +
-      ` — ${totalFetched} messages in ${chunkSeconds}s`,
-  );
+  syncLog.info(`Historical chunk ${chunkRange} — ${totalFetched} messages in ${chunkSeconds}s`);
 
   // Always advance through this chunk, including an empty one. The caller
   // stops after a bounded consecutive-empty streak; the floor is the absolute
