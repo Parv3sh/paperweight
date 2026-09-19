@@ -50,6 +50,9 @@ interface BatchState {
   total: number;
   succeeded: number[];
   failed: string[];
+  /** Senders whose only unsubscribe route is a web page; listed for the user
+   *  to open one by one. They stay in the list until marked done. */
+  manual: Array<{ id: number; name: string; url?: string }>;
 }
 
 // ---------- filter group ----------
@@ -266,21 +269,18 @@ export default function Mail(): JSX.Element {
   }, [fetchVendors]);
 
 
-  // Sync indeterminate state on select-all checkbox
-  const eligibleVendors = vendors.filter((v) => v.has_rfc8058 || v.has_mailto_unsub);
-  const allEligibleSelected =
-    eligibleVendors.length > 0 &&
-    eligibleVendors.every((v) => selectedIds.has(v.id));
-  const someEligibleSelected = eligibleVendors.some((v) =>
-    selectedIds.has(v.id),
-  );
+  // Sync indeterminate state on select-all checkbox. Every sender on the page
+  // is selectable: spam and trash need no unsubscribe method, and the batch
+  // unsubscribe hands web-only senders back as a list to open manually.
+  const allSelected =
+    vendors.length > 0 && vendors.every((v) => selectedIds.has(v.id));
+  const someSelected = vendors.some((v) => selectedIds.has(v.id));
 
   useEffect(() => {
     if (selectAllRef.current) {
-      selectAllRef.current.indeterminate =
-        someEligibleSelected && !allEligibleSelected;
+      selectAllRef.current.indeterminate = someSelected && !allSelected;
     }
-  }, [someEligibleSelected, allEligibleSelected]);
+  }, [someSelected, allSelected]);
 
   // ---------- toolbar ----------
 
@@ -345,10 +345,10 @@ export default function Mail(): JSX.Element {
   // ---------- select-all ----------
 
   const handleSelectAll = () => {
-    if (allEligibleSelected) {
+    if (allSelected) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(eligibleVendors.map((v) => v.id)));
+      setSelectedIds(new Set(vendors.map((v) => v.id)));
     }
   };
 
@@ -450,6 +450,7 @@ export default function Mail(): JSX.Element {
       total: 0,
       succeeded: [],
       failed: [],
+      manual: [],
     });
   };
 
@@ -467,6 +468,7 @@ export default function Mail(): JSX.Element {
 
     const succeeded: number[] = [];
     const failed: string[] = [];
+    const manual: BatchState["manual"] = [];
 
     for (let i = 0; i < batchVendors.length; i++) {
       setBatch((prev) => (prev ? { ...prev, current: i + 1 } : prev));
@@ -476,23 +478,29 @@ export default function Mail(): JSX.Element {
         if (kind === "unsubscribe") {
           const methods = await getOrFetchMethods(vendor.id);
           const rfc = methods.find((m) => m.method === "rfc8058");
+          const mailtoEntry = rfc ? undefined : pickBestMailto(methods);
+          if (!rfc && !mailtoEntry) {
+            // Nothing we can do silently: hand the sender back with its web
+            // page (if any) rather than counting it as a failure.
+            const best = pickBestMethod(methods);
+            const url = best && /^https?:/i.test(best.url) ? best.url : undefined;
+            manual.push({ id: vendor.id, name, url });
+            continue;
+          }
           let success = false;
           let sentEmail = false;
           if (rfc) {
             const result = await window.api.executeRfc8058(rfc.url);
             success = result.success;
-          } else {
-            const mailtoEntry = pickBestMailto(methods);
-            if (mailtoEntry) {
-              const { to, subject, body } = parseMailto(mailtoEntry.url);
-              const result = await window.api.sendEmail(
-                to,
-                subject,
-                body || PAPERWEIGHT_UNSUB_BODY,
-              );
-              success = result.success;
-              sentEmail = true;
-            }
+          } else if (mailtoEntry) {
+            const { to, subject, body } = parseMailto(mailtoEntry.url);
+            const result = await window.api.sendEmail(
+              to,
+              subject,
+              body || PAPERWEIGHT_UNSUB_BODY,
+            );
+            success = result.success;
+            sentEmail = true;
           }
           if (success) {
             await window.api.markVendorUnsubscribed(vendor.id);
@@ -530,7 +538,7 @@ export default function Mail(): JSX.Element {
     }
 
     setBatch((prev) =>
-      prev ? { ...prev, phase: "results", succeeded, failed } : prev,
+      prev ? { ...prev, phase: "results", succeeded, failed, manual } : prev,
     );
   };
 
@@ -738,13 +746,21 @@ export default function Mail(): JSX.Element {
       const labels = BATCH_LABELS[batch.kind];
 
       if (batch.phase === "confirm") {
+        const selectedVendors = vendors.filter((v) => selectedIds.has(v.id));
+        const autoCount = selectedVendors.filter(
+          (v) => v.has_rfc8058 || v.has_mailto_unsub,
+        ).length;
+        const manualCount = selectedVendors.length - autoCount;
+        const plural = (n: number) => (n === 1 ? "company" : "companies");
         return (
           <ActionModal
             isOpen
             title={labels.title}
             confirmLabel={
               batch.kind === "unsubscribe"
-                ? `Unsubscribe ${selectedIds.size} ${selectedIds.size === 1 ? "company" : "companies"}`
+                ? autoCount > 0
+                  ? `Unsubscribe ${autoCount} ${plural(autoCount)}`
+                  : "Continue"
                 : batch.kind === "spam"
                   ? "Report spam"
                   : "Move to trash"
@@ -755,11 +771,20 @@ export default function Mail(): JSX.Element {
           >
             {batch.kind === "unsubscribe" && (
               <>
-                <p>
-                  Paperweight will automatically send unsubscribe requests to{" "}
-                  <strong>{selectedIds.size}</strong>{" "}
-                  {selectedIds.size === 1 ? "company" : "companies"}.
-                </p>
+                {autoCount > 0 && (
+                  <p>
+                    Paperweight will automatically send unsubscribe requests to{" "}
+                    <strong>{autoCount}</strong> {plural(autoCount)}.
+                  </p>
+                )}
+                {manualCount > 0 && (
+                  <p>
+                    <strong>{manualCount}</strong> {plural(manualCount)} only
+                    {manualCount === 1 ? " offers" : " offer"} an unsubscribe web
+                    page. {manualCount === 1 ? "It" : "They"} will be listed
+                    afterwards with a link to open.
+                  </p>
+                )}
                 <label className="flex items-center gap-2 cursor-pointer mt-1">
                   <input
                     type="checkbox"
@@ -839,6 +864,34 @@ export default function Mail(): JSX.Element {
             <p className="text-base-content/60">
               Failed: {batch.failed.join(", ")}
             </p>
+          )}
+          {batch.manual.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-base-content/60">
+                {batch.manual.length}{" "}
+                {batch.manual.length === 1 ? "sender only offers" : "senders only offer"}{" "}
+                an unsubscribe web page. Open each one, then use its Unsubscribe
+                button in the list to mark it done.
+              </p>
+              <ul className="space-y-1 max-h-48 overflow-y-auto">
+                {batch.manual.map((m) => (
+                  <li key={m.id} className="flex items-center justify-between gap-3 text-sm">
+                    <span className="truncate">{m.name}</span>
+                    {m.url ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-xs shrink-0"
+                        onClick={() => window.api.openExternal(m.url!)}
+                      >
+                        Open
+                      </button>
+                    ) : (
+                      <span className="text-xs text-base-content/50 shrink-0">no link found</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </ActionModal>
       );
@@ -1317,9 +1370,9 @@ export default function Mail(): JSX.Element {
                 type="checkbox"
                 className="checkbox checkbox-sm"
                 ref={selectAllRef}
-                checked={allEligibleSelected}
+                checked={allSelected}
                 onChange={handleSelectAll}
-                disabled={eligibleVendors.length === 0}
+                disabled={vendors.length === 0}
               />
               {/* Col 2: separator — mirrors chevron slot width without implying expandability */}
               <div className="flex items-center justify-center">
@@ -1382,27 +1435,18 @@ export default function Mail(): JSX.Element {
                   >
                     <div className={`${ROW_GRID} w-full`}>
                       {/* Checkbox column */}
-                      {vendor.has_rfc8058 || vendor.has_mailto_unsub ? (
-                        <input
-                          type="checkbox"
-                          className="checkbox checkbox-sm"
-                          checked={selectedIds.has(vendor.id)}
-                          onChange={(e) => {
-                            const next = new Set(selectedIds);
-                            if (e.target.checked) next.add(vendor.id);
-                            else next.delete(vendor.id);
-                            setSelectedIds(next);
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      ) : (
-                        <input
-                          type="checkbox"
-                          className="checkbox checkbox-sm"
-                          disabled
-                          title="Requires manual unsubscribe"
-                        />
-                      )}
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-sm"
+                        checked={selectedIds.has(vendor.id)}
+                        onChange={(e) => {
+                          const next = new Set(selectedIds);
+                          if (e.target.checked) next.add(vendor.id);
+                          else next.delete(vendor.id);
+                          setSelectedIds(next);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
 
                       <ChevronRight
                         className={`w-5 h-5 text-base-content/50 shrink-0 transition-transform ${
