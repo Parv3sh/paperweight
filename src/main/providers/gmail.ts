@@ -38,9 +38,16 @@ const SCOPES_MODIFY =
 // with headroom for the rolling-window slop. Small burst capacities keep a
 // fresh sync or a click from front-loading a minute's budget into seconds.
 // Costs per https://developers.google.com/gmail/api/reference/quota
+// The ceiling is what we'd like to spend; the limiter adapts downwards from it
+// on rejections and recovers when Google stays quiet, because the effective
+// enforcement has proven stricter than the number quoted in the error body.
 const IN_SYNC_WORKER = parentPort !== null;
 const GMAIL_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 4_000 : 1_000;
+const GMAIL_MIN_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 600 : 200;
 const GMAIL_BURST_UNITS = IN_SYNC_WORKER ? 100 : 200;
+// How long every worker pauses when one request is rejected. The rejected
+// request itself still waits its own (longer) retry delay.
+const GMAIL_THROTTLE_HOLD_MS = 3_000;
 const QUOTA_COST = {
   get: 5,
   list: 5,
@@ -53,7 +60,11 @@ const QUOTA_COST = {
 } as const;
 // batchModify accepts at most 1000 ids per call.
 const BATCH_MODIFY_MAX_IDS = 1000;
-const gmailLimiter = new RateLimiter(GMAIL_UNITS_PER_MINUTE, GMAIL_BURST_UNITS);
+const gmailLimiter = new RateLimiter({
+  maxUnitsPerMinute: GMAIL_UNITS_PER_MINUTE,
+  minUnitsPerMinute: GMAIL_MIN_UNITS_PER_MINUTE,
+  burstUnits: GMAIL_BURST_UNITS,
+});
 
 // messages.get calls in flight per page. Throughput is bounded by the limiter
 // (5,000 units/min = ~16 messages/s); concurrency only needs to be high enough
@@ -214,12 +225,12 @@ async function gmailRequest(
       const delay = gmailRetryDelayMs(response.headers.get("Retry-After"), attempt);
       attempt++;
       if (response.status === 429 || response.status === 403) {
-        // We were throttled despite pacing: hold every in-flight worker, not
-        // just this one, so the whole sync eases off together.
-        gmailLimiter.penalize(delay);
+        // We were throttled despite pacing: hold every in-flight worker
+        // briefly and cut the sustained rate so the whole sync eases off.
+        gmailLimiter.penalize(Math.min(delay, GMAIL_THROTTLE_HOLD_MS));
       }
       syncLog.warn(
-        `Gmail API ${response.status}; retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${GMAIL_MAX_RETRIES})`,
+        `Gmail API ${response.status}; pacing ${gmailLimiter.currentRate()} units/min; retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${GMAIL_MAX_RETRIES})`,
       );
       await new Promise((r) => setTimeout(r, delay));
       continue;
