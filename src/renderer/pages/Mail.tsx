@@ -223,8 +223,13 @@ export default function Mail(): JSX.Element {
   const [priorityFilter, setPriorityFilter] = useState(restore?.priorityFilter ?? locState?.preset === "priorities");
   const [breachedFilter, setBreachedFilter] = useState(restore?.breachedFilter ?? locState?.preset === "breached");
 
-  // Batch selection
+  // Batch selection. "Select all N matching" spans every page: the ids live in
+  // selectedIds as usual, and knownVendorsRef keeps the Vendor objects behind
+  // them, since `vendors` only ever holds the current page's rows.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [allMatching, setAllMatching] = useState(false);
+  const [selectingAll, setSelectingAll] = useState(false);
+  const knownVendorsRef = useRef<Map<number, Vendor>>(new Map());
   const [batch, setBatch] = useState<BatchState | null>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const sortRef = useRef<HTMLDivElement>(null);
@@ -235,39 +240,77 @@ export default function Mail(): JSX.Element {
 
   // ---------- data fetching ----------
 
+  const buildQuery = useCallback(
+    (p: number, l: number): VendorQuery => ({
+      page: p,
+      limit: l,
+      sortBy: sortBy === "last_seen_asc" ? "last_seen" : sortBy,
+      sortDir:
+        sortBy === "name" ||
+        sortBy === "root_domain" ||
+        sortBy === "last_seen_asc"
+          ? "ASC"
+          : "DESC",
+      search: search || undefined,
+      filter: "lists",
+      activity: activityFilter || undefined,
+      volume: volumeFilter || undefined,
+      activeSubscriptions: priorityFilter || undefined,
+      onBreachList: breachedFilter || undefined,
+      showWhitelisted: whitelistedFilter || undefined,
+    }),
+    [sortBy, search, activityFilter, volumeFilter, priorityFilter, breachedFilter, whitelistedFilter],
+  );
+
   const fetchVendors = useCallback(
     async (silent = false) => {
       if (!silent) setLoading(true);
-      const query: VendorQuery = {
-        page,
-        limit,
-        sortBy: sortBy === "last_seen_asc" ? "last_seen" : sortBy,
-        sortDir:
-          sortBy === "name" ||
-          sortBy === "root_domain" ||
-          sortBy === "last_seen_asc"
-            ? "ASC"
-            : "DESC",
-        search: search || undefined,
-        filter: "lists",
-        activity: activityFilter || undefined,
-        volume: volumeFilter || undefined,
-        activeSubscriptions: priorityFilter || undefined,
-        onBreachList: breachedFilter || undefined,
-        showWhitelisted: whitelistedFilter || undefined,
-      };
-      const data = await window.api.queryVendors(query);
-      setVendors(data.vendors.filter((v) => !removedIdsRef.current.has(v.id)));
+      const data = await window.api.queryVendors(buildQuery(page, limit));
+      const visible = data.vendors.filter((v) => !removedIdsRef.current.has(v.id));
+      for (const v of visible) knownVendorsRef.current.set(v.id, v);
+      setVendors(visible);
       setTotal(data.total);
       setLoading(false);
     },
-    [page, sortBy, search, activityFilter, volumeFilter, priorityFilter, breachedFilter, whitelistedFilter],
+    [buildQuery, page],
   );
 
   useEffect(() => {
     fetchVendors();
   }, [fetchVendors]);
 
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setAllMatching(false);
+  };
+
+  const selectedVendors = (): Vendor[] =>
+    [...selectedIds]
+      .map((id) => knownVendorsRef.current.get(id))
+      .filter((v): v is Vendor => v !== undefined);
+
+  // Every sender matching the current search and filters, across all pages.
+  const handleSelectAllMatching = async (): Promise<void> => {
+    setSelectingAll(true);
+    try {
+      const pageSize = 500; // the query handler's per-request cap
+      const ids = new Set<number>();
+      for (let p = 1; ; p++) {
+        const data = await window.api.queryVendors(buildQuery(p, pageSize));
+        for (const v of data.vendors) {
+          if (removedIdsRef.current.has(v.id)) continue;
+          knownVendorsRef.current.set(v.id, v);
+          ids.add(v.id);
+        }
+        if (data.vendors.length < pageSize || p * pageSize >= data.total) break;
+      }
+      setSelectedIds(ids);
+      setAllMatching(true);
+    } finally {
+      setSelectingAll(false);
+    }
+  };
 
   // Sync indeterminate state on select-all checkbox. Every sender on the page
   // is selectable: spam and trash need no unsubscribe method, and the batch
@@ -288,7 +331,7 @@ export default function Mail(): JSX.Element {
     removedIdsRef.current = new Set();
     setSearch(value);
     setPage(1);
-    setSelectedIds(new Set());
+    clearSelection();
   };
 
   const handleClearAll = () => {
@@ -301,7 +344,7 @@ export default function Mail(): JSX.Element {
     setPriorityFilter(false);
     setBreachedFilter(false);
     setPage(1);
-    setSelectedIds(new Set());
+    clearSelection();
   };
 
   const hasAnyFilter = !!(search || sortBy !== "message_count" || volumeFilter || activityFilter || whitelistedFilter || priorityFilter || breachedFilter || page > 1);
@@ -310,13 +353,13 @@ export default function Mail(): JSX.Element {
     removedIdsRef.current = new Set();
     setSortBy(value);
     setPage(1);
-    setSelectedIds(new Set());
+    clearSelection();
   };
 
   const handlePageChange = (p: number) => {
     removedIdsRef.current = new Set();
     setPage(p);
-    setSelectedIds(new Set());
+    if (!allMatching) clearSelection();
   };
 
   useEffect(() => {
@@ -346,9 +389,10 @@ export default function Mail(): JSX.Element {
 
   const handleSelectAll = () => {
     if (allSelected) {
-      setSelectedIds(new Set());
+      clearSelection();
     } else {
       setSelectedIds(new Set(vendors.map((v) => v.id)));
+      setAllMatching(false);
     }
   };
 
@@ -458,7 +502,7 @@ export default function Mail(): JSX.Element {
     if (!batch || batch.phase !== "confirm") return;
     const kind = batch.kind;
     const trashAlso = batch.trashAlso;
-    const batchVendors = vendors.filter((v) => selectedIds.has(v.id));
+    const batchVendors = selectedVendors();
 
     setBatch((prev) =>
       prev
@@ -548,7 +592,7 @@ export default function Mail(): JSX.Element {
     succeeded.forEach((id) => removedIdsRef.current.add(id));
     setVendors((prev) => prev.filter((v) => !succeeded.includes(v.id)));
     setTotal((t) => t - succeeded.length);
-    setSelectedIds(new Set());
+    clearSelection();
     setBatch(null);
   };
 
@@ -746,11 +790,11 @@ export default function Mail(): JSX.Element {
       const labels = BATCH_LABELS[batch.kind];
 
       if (batch.phase === "confirm") {
-        const selectedVendors = vendors.filter((v) => selectedIds.has(v.id));
-        const autoCount = selectedVendors.filter(
+        const chosen = selectedVendors();
+        const autoCount = chosen.filter(
           (v) => v.has_rfc8058 || v.has_mailto_unsub,
         ).length;
-        const manualCount = selectedVendors.length - autoCount;
+        const manualCount = chosen.length - autoCount;
         const plural = (n: number) => (n === 1 ? "company" : "companies");
         return (
           <ActionModal
@@ -1318,7 +1362,7 @@ export default function Mail(): JSX.Element {
       <div className="flex items-center gap-2">
         <button
           className={`badge badge-sm cursor-pointer gap-1 ${whitelistedFilter ? "badge-accent" : "badge-soft badge-accent"}`}
-          onClick={() => { const next = !whitelistedFilter; setWhitelistedFilter(next); setPriorityFilter(false); setBreachedFilter(false); setPage(1); setSelectedIds(new Set()); }}
+          onClick={() => { const next = !whitelistedFilter; setWhitelistedFilter(next); setPriorityFilter(false); setBreachedFilter(false); setPage(1); clearSelection(); }}
         >
           <BadgeCheck className="w-3 h-3" />
           Whitelisted
@@ -1338,7 +1382,7 @@ export default function Mail(): JSX.Element {
                 setPriorityFilter(p.id === "priorities" ? next : false);
                 setBreachedFilter(p.id === "breached" ? next : false);
                 setPage(1);
-                setSelectedIds(new Set());
+                clearSelection();
               }}
             >
               {p.label}
@@ -1405,8 +1449,27 @@ export default function Mail(): JSX.Element {
                   <Trash2 className="w-4 h-4" strokeWidth={1.5} />
                 </button>
                 {selectedIds.size > 0 && (
-                  <span className="text-sm text-base-content/50 ml-1">
-                    {selectedIds.size} selected
+                  <span className="flex items-center gap-2 text-sm text-base-content/50 ml-1">
+                    <span>
+                      {allMatching
+                        ? `All ${selectedIds.size} matching selected`
+                        : `${selectedIds.size} selected`}
+                    </span>
+                    {selectingAll ? (
+                      <span className="loading loading-spinner loading-xs" />
+                    ) : allMatching ? (
+                      <button type="button" className="link link-primary" onClick={clearSelection}>
+                        Clear
+                      </button>
+                    ) : allSelected && total > vendors.length ? (
+                      <button
+                        type="button"
+                        className="link link-primary"
+                        onClick={handleSelectAllMatching}
+                      >
+                        Select all {total} matching
+                      </button>
+                    ) : null}
                   </span>
                 )}
               </div>
@@ -1442,7 +1505,10 @@ export default function Mail(): JSX.Element {
                         onChange={(e) => {
                           const next = new Set(selectedIds);
                           if (e.target.checked) next.add(vendor.id);
-                          else next.delete(vendor.id);
+                          else {
+                            next.delete(vendor.id);
+                            setAllMatching(false);
+                          }
                           setSelectedIds(next);
                         }}
                         onClick={(e) => e.stopPropagation()}
