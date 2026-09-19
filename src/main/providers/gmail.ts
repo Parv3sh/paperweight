@@ -14,6 +14,7 @@ import {
 } from "./gmail-retry";
 import { mapWithConcurrency } from "./concurrency";
 import { RateLimiter } from "./rate-limit";
+import { QUOTA_COST, batchModifyCost } from "./gmail-quota";
 import { parentPort } from "node:worker_threads";
 
 // Injected at build time via electron-vite define.
@@ -41,23 +42,16 @@ const SCOPES_MODIFY =
 // The ceiling is what we'd like to spend; the limiter adapts downwards from it
 // on rejections and recovers when Google stays quiet, because the effective
 // enforcement has proven stricter than the number quoted in the error body.
+// Observed behaviour fits a short (seconds-scale) window rather than a full
+// minute, so the burst allowance is kept to a handful of requests: a lull
+// must not be followed by a spike.
 const IN_SYNC_WORKER = parentPort !== null;
-const GMAIL_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 4_000 : 1_000;
-const GMAIL_MIN_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 600 : 200;
-const GMAIL_BURST_UNITS = IN_SYNC_WORKER ? 100 : 200;
+const GMAIL_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 4_000 : 1_500;
+const GMAIL_MIN_UNITS_PER_MINUTE = IN_SYNC_WORKER ? 300 : 100;
+const GMAIL_BURST_UNITS = IN_SYNC_WORKER ? 30 : 60;
 // How long every worker pauses when one request is rejected. The rejected
 // request itself still waits its own (longer) retry delay.
 const GMAIL_THROTTLE_HOLD_MS = 3_000;
-const QUOTA_COST = {
-  get: 5,
-  list: 5,
-  modify: 5,
-  trash: 5,
-  batchModify: 50,
-  send: 100,
-  history: 2,
-  profile: 1,
-} as const;
 // batchModify accepts at most 1000 ids per call.
 const BATCH_MODIFY_MAX_IDS = 1000;
 const gmailLimiter = new RateLimiter({
@@ -65,6 +59,19 @@ const gmailLimiter = new RateLimiter({
   minUnitsPerMinute: GMAIL_MIN_UNITS_PER_MINUTE,
   burstUnits: GMAIL_BURST_UNITS,
 });
+
+// Once a minute, when anything was sent, log what this process spent against
+// the quota and how often Google pushed back. Counts only — no message data.
+const quotaWindow = { requests: 0, units: 0, rejected: 0 };
+setInterval(() => {
+  if (quotaWindow.requests === 0) return;
+  syncLog.info(
+    `Gmail API last minute: ${quotaWindow.requests} requests, ${quotaWindow.units} units, ${quotaWindow.rejected} rejected; pacing ${gmailLimiter.currentRate()} units/min`,
+  );
+  quotaWindow.requests = 0;
+  quotaWindow.units = 0;
+  quotaWindow.rejected = 0;
+}, 60_000).unref();
 
 // messages.get calls in flight per page. Throughput is bounded by the limiter
 // (5,000 units/min = ~16 messages/s); concurrency only needs to be high enough
@@ -204,6 +211,8 @@ async function gmailRequest(
   let attempt = 0;
   while (true) {
     await gmailLimiter.acquire(cost);
+    quotaWindow.requests++;
+    quotaWindow.units += cost;
     const token = await getValidAccessToken();
     const response = await fetch(url, {
       method: init.method,
@@ -227,6 +236,7 @@ async function gmailRequest(
       if (response.status === 429 || response.status === 403) {
         // We were throttled despite pacing: hold every in-flight worker
         // briefly and cut the sustained rate so the whole sync eases off.
+        quotaWindow.rejected++;
         gmailLimiter.penalize(Math.min(delay, GMAIL_THROTTLE_HOLD_MS));
       }
       syncLog.warn(
@@ -289,7 +299,7 @@ async function batchModify(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids, addLabelIds, removeLabelIds }),
       },
-      QUOTA_COST.batchModify,
+      batchModifyCost(ids.length),
     );
   }
 }
